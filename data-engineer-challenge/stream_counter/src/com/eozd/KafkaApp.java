@@ -24,6 +24,10 @@ import java.util.concurrent.ExecutionException;
 
 @Command(name = "kafka_app", mixinStandardHelpOptions = true, version = "0.1", description = "Reads frames streamed in .jsonl format and produces unique user" + " counts for each minute in the data. The results are written both to STDOUT" + " and to a new Kafka topic.")
 class KafkaApp implements Callable<Integer> {
+    /**
+     * Command-line arguments.
+     */
+
     @Option(names="--broker", defaultValue = "localhost:9092", description = "Kafka server address (default: ${DEFAULT-VALUE})")
     private String broker = "localhost:9092";
 
@@ -42,11 +46,24 @@ class KafkaApp implements Callable<Integer> {
     @Option(names="--benchmark_period_sec", defaultValue = "1", description = "Time between benchmark measurements in seconds (default: ${DEFAULT-VALUE})")
     private int benchmarkPeriodSec = 1;
 
+    /**
+     * Main function which calls picocli execute and returns the error
+     * code back to the shell.
+     * @param args Command-line arguments.
+     */
     public static void main(String... args) {
         int exitCode = new CommandLine(new KafkaApp()).execute(args);
         System.exit(exitCode);
     }
 
+    /**
+     * Main logic of the application.
+     *
+     * This function handles creation of Kafka objects, setting them up and
+     * subsequently running the main loop of the application.
+     *
+     * @return 0 if there is no error during execution.
+     */
     @Override
     public Integer call() {
         KafkaConsumer<String, String> consumer = createConsumer(broker);
@@ -68,6 +85,17 @@ class KafkaApp implements Callable<Integer> {
         return 0;
     }
 
+    /**
+     * Main loop.
+     *
+     * This is where we read the data from Kafka, process it and return results back to Kafka
+     * and also to STDOUT periodically.
+     *
+     * @param consumer Kafka consumer object which is ready to read data from the frame topic.
+     * @param producer Kafka producer which sends the user count statistics to another topic.
+     * @param uniqUsers Data structure to update during execution.
+     * @param framesPerSec List where we append the current FPS value periodically.
+     */
     public void mainLoop(KafkaConsumer<String, String> consumer, KafkaProducer<Long, Stats> producer, Map<Long, TreeSet<String>> uniqUsers, DescriptiveStatistics framesPerSec) {
         long reportTimePrev = System.currentTimeMillis();
         long benchTimePrev = System.currentTimeMillis();
@@ -75,18 +103,22 @@ class KafkaApp implements Callable<Integer> {
         while (true) {
             ConsumerRecords<String, String> recordCollection = consumer.poll(100);
             numFrames += recordCollection.count();
+
+            // process the records
             try {
                 processRecords(recordCollection, uniqUsers);
             } catch (IllegalJSONException e) {
                 e.printStackTrace();
             }
 
+            // send results to Kafka periodically
             long timeCurr = System.currentTimeMillis();
             long reportSecondDiff = (timeCurr - reportTimePrev) / 1000;
             if (reportSecondDiff >= reportPeriodSec) {
                 sendUniqUsers(producer, uniqUsers);
             }
 
+            // Benchmark if needed
             if (benchmark) {
                 timeCurr = System.currentTimeMillis();
                 if (numFrames == 0) {
@@ -102,6 +134,7 @@ class KafkaApp implements Callable<Integer> {
                 }
             }
 
+            // Also output to STDOUT
             if (reportSecondDiff >= reportPeriodSec) {
                 printStats(uniqUsers);
                 reportTimePrev = timeCurr;
@@ -109,6 +142,12 @@ class KafkaApp implements Callable<Integer> {
         }
     }
 
+    /**
+     * Create a new KafkaProducer object which will send the user statistics to some topic.
+     *
+     * @param broker Address of the Kafka server.
+     * @return KafkaProducer object.
+     */
     public KafkaProducer<Long, Stats> createProducer(String broker) {
         Properties props = new Properties();
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker);
@@ -118,6 +157,12 @@ class KafkaApp implements Callable<Integer> {
         return new KafkaProducer<>(props);
     }
 
+    /**
+     * Create a new KafkaConsumer object which will read the frame records from some topic.
+     *
+     * @param broker Address of the Kafka server.
+     * @return KafkaConsumer object.
+     */
     public KafkaConsumer<String, String> createConsumer(String broker) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, broker);
@@ -127,6 +172,12 @@ class KafkaApp implements Callable<Integer> {
         return new KafkaConsumer<>(props);
     }
 
+    /**
+     * Send the current uniqUsers data structure to the Kafka topic assigned to producer.
+     *
+     * @param producer KafkaProducer object which we use to send the com.eozd.Stats object.
+     * @param uniqUsers Data structure holding the set of unique users for every minute.
+     */
     public void sendUniqUsers(KafkaProducer<Long, Stats> producer, Map<Long, TreeSet<String>> uniqUsers) {
         Map<Long, Integer> minuteToCount = new TreeMap<>();
         for (Long key : uniqUsers.keySet()) {
@@ -144,10 +195,22 @@ class KafkaApp implements Callable<Integer> {
         }
     }
 
+    /**
+     * Process the records obtained from Kafka frame topic.
+     *
+     * For every record in the collection obtained from Kafka, this method finds the
+     * minute when the record took place using the "ts" field and stores the user id "uid"
+     * of the record in the set of integers for that minute.
+     *
+     * @param recordCollection Records obtained from the Kafka consumer.
+     * @param uniqUsers Unique users data structure.
+     * @throws IllegalJSONException If one of the JSON strings doesn't contain top-level "ts" or "uid" fields.
+     */
     public void processRecords(ConsumerRecords<String, String> recordCollection, Map<Long, TreeSet<String>> uniqUsers) throws IllegalJSONException {
         for (ConsumerRecord<String, String> record : recordCollection) {
             String jsonString = record.value();
 
+            // Get uid
             String uidKey = "\"uid\":";
             int uidKeyBegIdx = findOutermostKey(jsonString, uidKey);
             if (uidKeyBegIdx == -1) {
@@ -157,6 +220,7 @@ class KafkaApp implements Callable<Integer> {
             int uidValEndIdx = jsonString.indexOf('"', uidValBegIdx);
             String strUid = jsonString.substring(uidValBegIdx, uidValEndIdx);
 
+            // Get ts
             String tsKey = "\"ts\":";
             int tsKeyBegIdx = findOutermostKey(jsonString, tsKey);
             if (tsKeyBegIdx == -1) {
@@ -167,6 +231,7 @@ class KafkaApp implements Callable<Integer> {
             String strTs = jsonString.substring(tsValBegIdx, tsValEndIdx);
             long ts = Long.parseLong(strTs);
 
+            // Store user id in the set for this minute
             long tsFlooredToMinute = (ts / 60) * 60;
             if (!uniqUsers.containsKey(tsFlooredToMinute)) {
                 uniqUsers.put(tsFlooredToMinute, new TreeSet<>());
@@ -175,6 +240,18 @@ class KafkaApp implements Callable<Integer> {
         }
     }
 
+    /**
+     * Find the starting index of the given key in the top-level of the JSON string.
+     *
+     * For example, for the below JSON object the call findOutermostKey(json, "a") returns
+     * the index of the second "a"
+     *
+     * {"b": {"a": 5}, "a": 1}
+     *
+     * @param jsonString Well-formatted JSON string.
+     * @param key Key to locate.
+     * @return Index of the key at the top-level. If the key doesn't exist, returns -1.
+     */
     public int findOutermostKey(String jsonString, String key) {
         int nCurlyBrackets = 0;
         for (int i = 0; i < jsonString.length() - key.length(); ++i) {
@@ -184,6 +261,7 @@ class KafkaApp implements Callable<Integer> {
                 nCurlyBrackets--;
             }
             if (nCurlyBrackets != 1) continue;
+
             boolean equal = true;
             for (int j = 0; j < key.length(); ++j) {
                 if (jsonString.charAt(i + j) != key.charAt(j)) {
@@ -198,6 +276,10 @@ class KafkaApp implements Callable<Integer> {
         return -1;
     }
 
+    /**
+     * Print benchmarking statistics.
+     * @param framesPerSec Array containing all of the periodic FPS values.
+     */
     public void printBenchmarkResults(DescriptiveStatistics framesPerSec) {
         System.out.println("BENCHMARK RESULTS");
         System.out.println("-----------------");
@@ -215,6 +297,13 @@ class KafkaApp implements Callable<Integer> {
         System.out.println("95th percentile : " + perc_95);
     }
 
+    /**
+     * Print the minute windows and the number of unique users for each window.
+     * A minute of the form 12:30:00 represents all the seconds from
+     * 12:30:00 until 12:30:59.
+     *
+     * @param uniqUsers Unique users data structure.
+     */
     public void printStats(Map<Long, TreeSet<String>> uniqUsers) {
         DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
         System.out.println(dateFormatter.format(LocalDateTime.now()));
@@ -228,6 +317,12 @@ class KafkaApp implements Callable<Integer> {
         System.out.println();
     }
 
+    /**
+     * Set up an interrupt hook so that when Ctrl-C is pressed we stop polling
+     * from Kafka topic.
+     *
+     * @param consumer Consumer object to stop polling.
+     */
     public void setUpInterruptHook(KafkaConsumer<?, ?> consumer) {
         Thread mainThread = Thread.currentThread();
         Runtime.getRuntime().addShutdownHook(new Thread() {

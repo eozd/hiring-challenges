@@ -5,6 +5,10 @@ import org.apache.kafka.common.serialization.Serializer;
 
 import java.util.Map;
 
+/**
+ * Serializer object to be used with Kafka framework to send Stats objects
+ * as records.
+ */
 public class StatsSerializer implements Serializer<Stats> {
 
     @Override
