@@ -1,9 +1,5 @@
 package com.eozd;
 
-import com.fasterxml.jackson.core.JsonParseException;
-import com.fasterxml.jackson.databind.JsonMappingException;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -79,7 +75,11 @@ class KafkaApp implements Callable<Integer> {
         while (true) {
             ConsumerRecords<String, String> recordCollection = consumer.poll(100);
             numFrames += recordCollection.count();
-            processRecords(recordCollection, uniqUsers);
+            try {
+                processRecords(recordCollection, uniqUsers);
+            } catch (IllegalJSONException e) {
+                e.printStackTrace();
+            }
 
             long timeCurr = System.currentTimeMillis();
             long reportSecondDiff = (timeCurr - reportTimePrev) / 1000;
@@ -144,28 +144,58 @@ class KafkaApp implements Callable<Integer> {
         }
     }
 
-    public void processRecords(ConsumerRecords<String, String> recordCollection, Map<Long, TreeSet<String>> uniqUsers) {
-        ObjectMapper jsonMapper = new ObjectMapper();
+    public void processRecords(ConsumerRecords<String, String> recordCollection, Map<Long, TreeSet<String>> uniqUsers) throws IllegalJSONException {
         for (ConsumerRecord<String, String> record : recordCollection) {
             String jsonString = record.value();
-            JsonNode json = null;
-            try {
-                json = jsonMapper.readValue(jsonString, JsonNode.class);
-            } catch (JsonParseException e) {
 
-            } catch (JsonMappingException e) {
-
-            } catch (java.io.IOException e) {
-
+            String uidKey = "\"uid\":";
+            int uidKeyBegIdx = findOutermostKey(jsonString, uidKey);
+            if (uidKeyBegIdx == -1) {
+                throw new IllegalJSONException("JSON string must have \"uid\" as a top-level field.");
             }
-            String strUid = json.get("uid").toString();
-            long ts = json.get("ts").asLong();
+            int uidValBegIdx = uidKeyBegIdx + uidKey.length() + 1;
+            int uidValEndIdx = jsonString.indexOf('"', uidValBegIdx);
+            String strUid = jsonString.substring(uidValBegIdx, uidValEndIdx);
+
+            String tsKey = "\"ts\":";
+            int tsKeyBegIdx = findOutermostKey(jsonString, tsKey);
+            if (tsKeyBegIdx == -1) {
+                throw new IllegalJSONException("JSON string must have \"ts\" as a top-level field.");
+            }
+            int tsValBegIdx = tsKeyBegIdx + tsKey.length();
+            int tsValEndIdx = jsonString.indexOf(',', tsValBegIdx);
+            String strTs = jsonString.substring(tsValBegIdx, tsValEndIdx);
+            long ts = Long.parseLong(strTs);
+
             long tsFlooredToMinute = (ts / 60) * 60;
             if (!uniqUsers.containsKey(tsFlooredToMinute)) {
                 uniqUsers.put(tsFlooredToMinute, new TreeSet<>());
             }
             uniqUsers.get(tsFlooredToMinute).add(strUid);
         }
+    }
+
+    public int findOutermostKey(String jsonString, String key) {
+        int nCurlyBrackets = 0;
+        for (int i = 0; i < jsonString.length() - key.length(); ++i) {
+            if (jsonString.charAt(i) == '{') {
+                nCurlyBrackets++;
+            } else if (jsonString.charAt(i) == '}') {
+                nCurlyBrackets--;
+            }
+            if (nCurlyBrackets != 1) continue;
+            boolean equal = true;
+            for (int j = 0; j < key.length(); ++j) {
+                if (jsonString.charAt(i + j) != key.charAt(j)) {
+                    equal = false;
+                    break;
+                }
+            }
+            if (equal) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     public void printBenchmarkResults(DescriptiveStatistics framesPerSec) {
