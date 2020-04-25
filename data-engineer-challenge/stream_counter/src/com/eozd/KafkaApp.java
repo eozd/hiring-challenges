@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -17,7 +18,6 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import picocli.CommandLine;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Command;
-import picocli.CommandLine.Parameters;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -29,61 +29,84 @@ import java.util.concurrent.ExecutionException;
 @Command(name = "kafka_app", mixinStandardHelpOptions = true, version = "0.1", description = "Reads frames streamed in .jsonl format and produces unique user" + " counts for each minute in the data. The results are written both to STDOUT" + " and to a new Kafka topic.")
 class KafkaApp implements Callable<Integer> {
     @Option(names="--broker", defaultValue = "localhost:9092", description = "Kafka server address (default: ${DEFAULT-VALUE})")
-    private String broker;
+    private String broker = "localhost:9092";
 
-    @Option(names="--report_period_sec", defaultValue = "5", description = "The time between two reports. This is used both for STDOUT" + " and for writing back to Kafka (default: ${DEFAULT-VALUE})")
+    @Option(names="--report_period_sec", defaultValue = "5", description = "The time between two reports in seconds. This is used both for STDOUT" + " and for writing back to Kafka (default: ${DEFAULT-VALUE})")
     private int reportPeriodSec = 5;
 
     @Option(names="--jsonl_topic", defaultValue = "kafka_data", description = "Topic name of the frame data (default: ${DEFAULT-VALUE})")
-    private String jsonlTopic;
+    private String jsonlTopic = "kafka_data";
 
     @Option(names="--stats_topic", defaultValue = "stats", description = "Topic name of the output statistics (default: ${DEFAULT-VALUE})")
-    private String statsTopic;
+    private String statsTopic = "stats";
+
+    @Option(names="--benchmark", description = "Print benchmark stats when process is terminated with Ctrl-C")
+    private boolean benchmark = false;
+
+    @Option(names="--benchmark_period_sec", defaultValue = "1", description = "Time between benchmark measurements in seconds (default: ${DEFAULT-VALUE})")
+    private int benchmarkPeriodSec = 1;
+
+    public static void main(String... args) {
+        int exitCode = new CommandLine(new KafkaApp()).execute(args);
+        System.exit(exitCode);
+    }
 
     @Override
     public Integer call() {
         KafkaConsumer<String, String> consumer = createConsumer(broker);
         KafkaProducer<Long, Stats> producer = createProducer(broker);
         consumer.subscribe(Collections.singletonList(jsonlTopic));
-
-        Thread mainThread = Thread.currentThread();
-        Runtime.getRuntime().addShutdownHook(new Thread() {
-            public void run() {
-                System.out.println("Exiting...");
-                consumer.wakeup();
-                try {
-                    mainThread.join();
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }
-        });
+        setUpInterruptHook(consumer);
 
         Map<Long, TreeSet<String>> uniqUsers = new TreeMap<>();
+        DescriptiveStatistics framesPerSec = new DescriptiveStatistics();
         try {
-            long timePrev = System.currentTimeMillis();
-            while (true) {
-                ConsumerRecords<String, String> recordCollection = consumer.poll(100);
-                processRecords(recordCollection, uniqUsers);
-                long timeCurr = System.currentTimeMillis();
-                long secondDiff = (timeCurr - timePrev) / 1000;
-                if (secondDiff >= reportPeriodSec) {
-                    sendUniqUsers(producer, uniqUsers);
-                    printStats(uniqUsers);
-                    timePrev = timeCurr;
-                }
-            }
+            mainLoop(consumer, producer, uniqUsers, framesPerSec);
         } catch (WakeupException e) {
-
+            if (benchmark) {
+                printBenchmarkResults(framesPerSec);
+            }
         } finally {
             consumer.close();
         }
         return 0;
     }
 
-    public static void main(String... args) {
-        int exitCode = new CommandLine(new KafkaApp()).execute(args);
-        System.exit(exitCode);
+    public void mainLoop(KafkaConsumer<String, String> consumer, KafkaProducer<Long, Stats> producer, Map<Long, TreeSet<String>> uniqUsers, DescriptiveStatistics framesPerSec) {
+        long reportTimePrev = System.currentTimeMillis();
+        long benchTimePrev = System.currentTimeMillis();
+        long numFrames = 0;
+        while (true) {
+            ConsumerRecords<String, String> recordCollection = consumer.poll(100);
+            numFrames += recordCollection.count();
+            processRecords(recordCollection, uniqUsers);
+
+            long timeCurr = System.currentTimeMillis();
+            long reportSecondDiff = (timeCurr - reportTimePrev) / 1000;
+            if (reportSecondDiff >= reportPeriodSec) {
+                sendUniqUsers(producer, uniqUsers);
+            }
+
+            if (benchmark) {
+                timeCurr = System.currentTimeMillis();
+                if (numFrames == 0) {
+                    benchTimePrev = timeCurr;
+                } else {
+                    double benchSecondDiff = (timeCurr - benchTimePrev) / 1000.0;
+                    if (benchSecondDiff >= benchmarkPeriodSec) {
+                        double fps = numFrames / benchSecondDiff;
+                        framesPerSec.addValue(fps);
+                        benchTimePrev = timeCurr;
+                        numFrames = 0;
+                    }
+                }
+            }
+
+            if (reportSecondDiff >= reportPeriodSec) {
+                printStats(uniqUsers);
+                reportTimePrev = timeCurr;
+            }
+        }
     }
 
     public KafkaProducer<Long, Stats> createProducer(String broker) {
@@ -145,6 +168,27 @@ class KafkaApp implements Callable<Integer> {
         }
     }
 
+    public void printBenchmarkResults(DescriptiveStatistics framesPerSec) {
+        System.out.println("BENCHMARK RESULTS");
+        System.out.println("-----------------");
+
+        double mean = framesPerSec.getMean();
+        double std = framesPerSec.getStandardDeviation();
+        double perc_5 = framesPerSec.getPercentile(5.0);
+        double perc_50 = framesPerSec.getPercentile(50.0);
+        double perc_95 = framesPerSec.getPercentile(95.0);
+        System.out.println("FRAMES PER SECOND");
+        System.out.println("Mean            : " + mean);
+        System.out.println("Std             : " + std);
+        System.out.println("Median          : " + perc_50);
+        System.out.println("5th percentile  : " + perc_5);
+        System.out.println("95th percentile : " + perc_95);
+
+        for (double fps : framesPerSec.getValues()) {
+            System.out.println(fps);
+        }
+    }
+
     public void printStats(Map<Long, TreeSet<String>> uniqUsers) {
         DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
         System.out.println(dateFormatter.format(LocalDateTime.now()));
@@ -156,5 +200,20 @@ class KafkaApp implements Callable<Integer> {
             System.out.println("|" + time.toString() + " | " + uniqUsers.get(minute).size() + "|");
         }
         System.out.println();
+    }
+
+    public void setUpInterruptHook(KafkaConsumer<?, ?> consumer) {
+        Thread mainThread = Thread.currentThread();
+        Runtime.getRuntime().addShutdownHook(new Thread() {
+            public void run() {
+                System.out.println("Exiting...");
+                consumer.wakeup();
+                try {
+                    mainThread.join();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        });
     }
 }
