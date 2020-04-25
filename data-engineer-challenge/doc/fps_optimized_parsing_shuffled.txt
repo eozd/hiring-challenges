@@ -1,0 +1,8 @@
+BENCHMARK RESULTS
+-----------------
+FRAMES PER SECOND
+Mean            : 39935.297644785314
+Std             : 27371.75160791181
+Median          : 29287.72139297008
+5th percentile  : 4293.968413231643
+95th percentile : 78482.79920477136
