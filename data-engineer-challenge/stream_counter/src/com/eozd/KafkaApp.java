@@ -213,10 +213,6 @@ class KafkaApp implements Callable<Integer> {
         System.out.println("Median          : " + perc_50);
         System.out.println("5th percentile  : " + perc_5);
         System.out.println("95th percentile : " + perc_95);
-
-        for (double fps : framesPerSec.getValues()) {
-            System.out.println(fps);
-        }
     }
 
     public void printStats(Map<Long, TreeSet<String>> uniqUsers) {
