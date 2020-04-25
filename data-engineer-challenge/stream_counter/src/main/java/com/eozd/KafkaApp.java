@@ -283,6 +283,9 @@ class KafkaApp implements Callable<Integer> {
     public void printBenchmarkResults(DescriptiveStatistics framesPerSec) {
         System.out.println("BENCHMARK RESULTS");
         System.out.println("-----------------");
+        if (framesPerSec.getValues().length == 0) {
+            return;
+        }
 
         double mean = framesPerSec.getMean();
         double std = framesPerSec.getStandardDeviation();
