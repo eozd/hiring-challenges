@@ -9,5 +9,6 @@
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="library" exported="" name="com.fasterxml.jackson.core:jackson-databind:2.0.6" level="project" />
     <orderEntry type="library" exported="" name="org.apache.kafka:kafka-clients:0.10.0.0" level="project" />
+    <orderEntry type="library" exported="" name="info.picocli:picocli:4.0.0-beta-1b" level="project" />
   </component>
 </module>
